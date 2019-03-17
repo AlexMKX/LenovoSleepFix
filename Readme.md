@@ -25,7 +25,7 @@ implement custom programs/scripts on sleep/wake for additional functionality
 
 ## License
 
-1. GPL
+1. LGPL
 1. No warranty.
 1. No indemnification
 1. Use at your own risk
