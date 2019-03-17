@@ -5,6 +5,7 @@ What it does :
 1. Starts stopped services on lid open 
 
 how to use : 
+1. Download https://github.com/AlexMKX/LenovoSleepFix/raw/master/Release/OnSleep.exe and save it where it will reside (it don't copy itself anywhere)
 1. Open elevated command prompt
 1. run OnSleep.exe --install
 1. Check events in event log for any problems.
