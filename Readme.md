@@ -8,6 +8,7 @@ how to use :
 1. Open elevated command prompt
 1. run OnSleep.exe --install
 1. Check events in event log for any problems.
+1. run OnSleep.exe --help for additional options.
 
 todo:
 implement custom programs/scripts on sleep/wake for additional functionality
