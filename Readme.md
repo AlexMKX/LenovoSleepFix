@@ -11,8 +11,14 @@ how to use :
 1. Check events in event log for any problems.
 1. run OnSleep.exe --help for additional options.
 
+release notes:
+You MUST use Intel High Definition Audio (10.0.17763.1) or later driver, instead of Realtek High Definition Audio(SST), because last one don't recovers audio functionality after service start/stop and you'll have deaf and dump laptop after wakeup.
+
+
 todo:
 implement custom programs/scripts on sleep/wake for additional functionality
+
+
 
 License : 
 1. GPL
