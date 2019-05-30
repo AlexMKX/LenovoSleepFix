@@ -32,8 +32,8 @@ int wmain(int argc, wchar_t *argv[])
 			("help", "produce help message")
 			("install", "installs service")
 			("uninstall", "removes service")
-			("onsleep", po::wvalue<std::wstring>(), "command to execute on sleep")
-			("onwake", po::wvalue<std::wstring>(), "command to execute on wake")
+			("onsleep", po::wvalue<std::wstring>(), "scheduler task name to execute on sleep")
+			("onwake", po::wvalue<std::wstring>(), "scheduler task name to execute on wake")
 			("nocommands", "clear commands to execute on sleep/wake")
 			("commands", "show commands to execute on sleep/wake")
 
@@ -61,6 +61,8 @@ int wmain(int argc, wchar_t *argv[])
 			key.SetStringValue(L"OnWake", L"");
 			key.DeleteValue(L"OnWake");
 			key.DeleteValue(L"OnSleep");
+
+
 		}
 		if (vm.count("commands")) {
 			auto vals = key.EnumValues();
@@ -68,6 +70,7 @@ int wmain(int argc, wchar_t *argv[])
 			if (std::find(vals.begin(), vals.end(), std::make_pair(std::wstring(L"OnSleep"), REG_SZ)) != vals.end())
 				std::wcout << key.GetStringValue(L"OnSleep") << std::endl;
 			else std::wcout << L"UNSET" << std::endl;
+
 			std::wcout << "OnWake=";
 			if (std::find(vals.begin(), vals.end(), std::make_pair(std::wstring(L"OnWake"), REG_SZ)) != vals.end())
 				std::wcout << key.GetStringValue(L"OnWake") << std::endl;

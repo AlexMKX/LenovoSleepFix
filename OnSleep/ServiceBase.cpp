@@ -1,22 +1,3 @@
-/****************************** Module Header ******************************\
-* Module Name:  ServiceBase.cpp
-* Project:      OnSleep
-* Copyright (c) Microsoft Corporation.
-* 
-* Provides a base class for a service that will exist as part of a service 
-* application. CServiceBase must be derived from when creating a new service 
-* class.
-* 
-* This source is subject to the Microsoft Public License.
-* See http://www.microsoft.com/en-us/openness/resources/licenses.aspx#MPL.
-* All other rights reserved.
-* 
-* THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
-* EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED 
-* WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
-\***************************************************************************/
-
-#pragma region Includes
 #include "ServiceBase.h"
 #include <assert.h>
 #include <strsafe.h>
@@ -27,39 +8,40 @@
 #include <boost/locale.hpp>
 #include <boost/filesystem.hpp>
 #include "WinReg.hpp"
-#pragma endregion
+#include <initguid.h>
+#include <ole2.h>
+#include <mstask.h>
+#include <msterr.h>
+#include <wchar.h>
+#include <stdio.h>
+#include <taskschd.h>
+#include <comdef.h>
+#pragma comment(lib, "taskschd.lib")
 
 using namespace boost;
 using namespace boost::log;
 
-#pragma region Static Members
-class CServiceHandle {
-public:
-	CServiceHandle(SC_HANDLE hnd) {
-		m_scHandle = hnd;
-	}
-	SC_HANDLE operator = (const SC_HANDLE hnd) {
-		m_scHandle = hnd;
-		return m_scHandle;
-	}
-	operator SC_HANDLE(){
-		return m_scHandle;
-	}
-	~CServiceHandle() {
-		if (NULL != m_scHandle)
-			CloseServiceHandle(m_scHandle);
-	}
-private:
-	SC_HANDLE m_scHandle=NULL;
-};
+
 
 // Initialize the singleton service instance.
 CServiceBase *CServiceBase::s_service = NULL;
+
 std::string from_unicode(std::wstring lstr) {
 	return boost::locale::conv::from_utf(lstr, "UTF-8");
 }
 std::wstring to_unicode(std::string lstr) {
 	return boost::locale::conv::to_utf<wchar_t>(lstr, "UTF-8");
+}
+std::wstring GuidToString(GUID guid)
+{
+	wchar_t guid_cstr[39];
+	wsprintf(guid_cstr,
+		L"{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+		guid.Data1, guid.Data2, guid.Data3,
+		guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+		guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+
+	return std::wstring(guid_cstr);
 }
 BOOL CServiceBase::Run(CServiceBase &service)
 {
@@ -83,17 +65,12 @@ void WINAPI CServiceBase::ServiceMain(DWORD dwArgc, PWSTR *pszArgv)
 {
     assert(s_service != NULL);
 
-    // Register the handler function for the service
     s_service->m_statusHandle = RegisterServiceCtrlHandlerEx(
         s_service->m_name, ServiceCtrlHandlerEx,NULL);
     if (s_service->m_statusHandle == NULL)
     {
-        throw GetLastError();
+		throw runtime_error(str(format("Unable to start service %d") % GetLastError()).c_str());
     }
-	//Sleep(10000);
-	s_service->m_hLidSwitchNotify=RegisterPowerSettingNotification(s_service->m_statusHandle, &GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_SERVICE_HANDLE);
-	s_service->m_hPowerSrcNotify = RegisterPowerSettingNotification(s_service->m_statusHandle, &GUID_ACDC_POWER_SOURCE, DEVICE_NOTIFY_SERVICE_HANDLE);
-    // Start the service.
     s_service->Start(dwArgc, pszArgv);
 
 }
@@ -111,52 +88,55 @@ DWORD  WINAPI CServiceBase::ServiceCtrlHandlerEx(DWORD dwCtrl,DWORD dwEventType,
 	return NO_ERROR;
 }
 
-#pragma endregion
-std::wstring GuidToString(GUID guid)
-{
-	wchar_t guid_cstr[39];
-	wsprintf(guid_cstr,
-		L"{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
-		guid.Data1, guid.Data2, guid.Data3,
-		guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
-		guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
-
-	return std::wstring(guid_cstr);
-}
 DWORD CServiceBase::OnPowerEvent(DWORD dwEventType, LPVOID lpEventdata, LPVOID lpContext)
-{
-	TCHAR buff[1024];
-	
+{	
 	if (PBT_POWERSETTINGCHANGE == dwEventType) {
-		POWERBROADCAST_SETTING* lpbs = (POWERBROADCAST_SETTING*)lpEventdata;
-		if (GUID_ACDC_POWER_SOURCE == lpbs->PowerSetting)
-		{
-			this->bBattery = *(DWORD*)lpbs->Data;
+		s_service->m_PowerCs.Lock();
+		try {
+			POWERBROADCAST_SETTING* lpbs = (POWERBROADCAST_SETTING*)lpEventdata;
+			if (GUID_ACDC_POWER_SOURCE == lpbs->PowerSetting)
+			{
+				this->bBattery = *(DWORD*)lpbs->Data;
+			}
+			if (GUID_LIDSWITCH_STATE_CHANGE == lpbs->PowerSetting)
+			{
+				this->bLid = *(DWORD*)lpbs->Data;
+			}
+			s_service->WriteEventLogEntry(str(format("Lid %d Battery %d") % this->bLid % this->bBattery).c_str(), EVENTLOG_INFORMATION_TYPE);
+			if (0 == this->bLid && 1 == this->bBattery)
+				OnSleep();
+			if (1 == this->bLid)
+				OnWake();
 		}
-		if (GUID_LIDSWITCH_STATE_CHANGE == lpbs->PowerSetting)
+		catch (...)
 		{
-			this->bLid = *(DWORD*)lpbs->Data;
-		}
-		wsprintf(buff, L"Lid %d Battery %d", this->bLid, this->bBattery);
-		s_service->WriteEventLogEntry(buff, EVENTLOG_INFORMATION_TYPE);
-		if (0 == this->bLid && 1 == this->bBattery)
-			OnSleep();
-		if (1 == this->bLid)
-			OnResume();
 
+		}
+		s_service->m_PowerCs.Unlock();
 	}
 	return NO_ERROR;
 }
-void CServiceBase::OnResume() {
-	s_service->WriteEventLogEntry(L"Entering wakeup transition", EVENTLOG_INFORMATION_TYPE);
-	s_service->StartServices();
+void CServiceBase::OnWake() {
+	try {
+		WriteEventLogEntry(L"Entering wakeup transition", EVENTLOG_INFORMATION_TYPE);
+		StartServices();
+	}
+	catch (...) {
+		WriteErrorLogEntry(L"Exception during wake transition", GetLastError());
+	}
 }
 void CServiceBase::OnSleep()
 {
-	s_service->WriteEventLogEntry(L"Entering sleep transition", EVENTLOG_INFORMATION_TYPE);
-	s_service->StopServices();
+
+	try {
+		WriteEventLogEntry(L"Entering sleep transition", EVENTLOG_INFORMATION_TYPE);
+		StopServices();
+	}
+	catch (...) {
+		WriteErrorLogEntry(L"Exception during sleep transition", GetLastError());
+
+	}
 }
-#pragma region Service Constructor and Destructor
 
 
 
@@ -164,19 +144,10 @@ CServiceBase::CServiceBase(PWSTR pszServiceName,
                            BOOL fCanStop, 
                            BOOL fCanShutdown)
 {
-    // Service name must be a valid string and cannot be NULL.
     m_name = (pszServiceName == NULL) ? L"" : pszServiceName;
-
     m_statusHandle = NULL;
-
-    // The service runs in its own process.
     m_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-
-    // The service is starting.
     m_status.dwCurrentState = SERVICE_START_PENDING;
-	m_hPowerSrcNotify = NULL;
-	m_hLidSwitchNotify = NULL;
-    // The accepted commands of the service.
     DWORD dwControlsAccepted = 0;
     if (fCanStop) 
         dwControlsAccepted |= SERVICE_ACCEPT_STOP;
@@ -184,64 +155,53 @@ CServiceBase::CServiceBase(PWSTR pszServiceName,
         dwControlsAccepted |= SERVICE_ACCEPT_SHUTDOWN;
 	dwControlsAccepted |= SERVICE_ACCEPT_POWEREVENT;
     m_status.dwControlsAccepted = dwControlsAccepted;
-
     m_status.dwWin32ExitCode = NO_ERROR;
     m_status.dwServiceSpecificExitCode = 0;
     m_status.dwCheckPoint = 0;
     m_status.dwWaitHint = 0;
-	vecServices.clear();
-}
 
+}
 
 
 CServiceBase::~CServiceBase(void)
 {
-	CloseServiceHandle(hScm);
+	UnregPowerNotification();
 }
-
-#pragma endregion
-
-
-
-
 
 void CServiceBase::Start(DWORD dwArgc, PWSTR *pszArgv)
 {
     try
     {
 		hScm = OpenSCManager(NULL, NULL, GENERIC_ALL);
-		if (NULL==hScm)
+		if (hScm.empty())
 		{
 			WriteErrorLogEntry(L"Unable to open SCM", GetLastError());
-			throw std::runtime_error("Unable to open SCM");
+			throw runtime_error("Unable to open SCM");
 		}
         // Tell SCM that the service is starting.
         SetServiceStatus(SERVICE_START_PENDING);
+
+		vecServices.clear();
 		winreg::RegKey key(HKEY_LOCAL_MACHINE, L"SOFTWARE\\OnSleep");
 		auto vals = key.EnumValues();
 		if (std::find(vals.begin(), vals.end(), std::make_pair(std::wstring(L"OnSleep"), REG_SZ)) != vals.end())
-			ExecOnSleep=key.GetStringValue(L"OnSleep");
+			ExecOnSleep = key.GetStringValue(L"OnSleep");
 		if (std::find(vals.begin(), vals.end(), std::make_pair(std::wstring(L"OnWake"), REG_SZ)) != vals.end())
 			ExecOnWake = key.GetStringValue(L"OnWake");
 
-        // Tell SCM that the service is started.
+		if (!RegPowerNotification())
+			throw runtime_error("Unable to register Power Notification");
         SetServiceStatus(SERVICE_RUNNING);
     }
-    catch (DWORD dwError)
-    {
-        // Log the error.
-        WriteErrorLogEntry(L"Service Start", dwError);
-
-        // Set the service status to be stopped.
-        SetServiceStatus(SERVICE_STOPPED, dwError);
-    }
-
+	catch (runtime_error e)
+	{
+		DWORD dwOldError = GetLastError();
+		WriteErrorLogEntry(str(format("Unable to initialize service %s") % e.what()).c_str());
+		SetServiceStatus(SERVICE_STOPPED, dwOldError);
+	}
     catch (...)
     {
-        // Log the error.
         WriteEventLogEntry(L"Service failed to start.", EVENTLOG_ERROR_TYPE);
-
-        // Set the service status to be stopped.
         SetServiceStatus(SERVICE_STOPPED);
     }
 }
@@ -249,7 +209,7 @@ void CServiceBase::Start(DWORD dwArgc, PWSTR *pszArgv)
 void CServiceBase::SendStopSignals(std::wstring pwService)
 {
 	CServiceHandle hChild = OpenService(hScm, pwService.c_str(), SC_MANAGER_ALL_ACCESS);
-	if (NULL == hChild)
+	if (hChild.empty())
 		throw runtime_error(from_unicode(str(wformat(L"Unable to open service %s with %d") % pwService % GetLastError())));
 	SERVICE_STATUS tStatus;
 	if (!ControlService(hChild, SERVICE_CONTROL_STOP, &tStatus))
@@ -264,7 +224,7 @@ void CServiceBase::SendStopSignals(std::wstring pwService)
 DWORD CServiceBase::GetServiceState(std::wstring sName)
 {
 	CServiceHandle hChild = OpenService(hScm, sName.c_str(), SC_MANAGER_ALL_ACCESS);
-	if (NULL == hChild)
+	if (hChild.empty())
 		throw runtime_error(from_unicode(str(wformat(L"Unable to open service %s with %d") % sName % GetLastError())));
 	SERVICE_STATUS tStatus;
 	if (!QueryServiceStatus(hChild, &tStatus))
@@ -278,7 +238,7 @@ DWORD CServiceBase::GetServiceState(std::wstring sName)
 }
 void CServiceBase::KillService(std::wstring sName) {
 	CServiceHandle hChild = OpenService(hScm, sName.c_str(), SC_MANAGER_ALL_ACCESS);
-	if (NULL == hChild)
+	if (hChild.empty())
 		throw runtime_error(from_unicode(str(wformat(L"Unable to open service %s with %d") % sName % GetLastError())));
 	SERVICE_STATUS_PROCESS ssp;
 	DWORD pBytesNeeded = 0;
@@ -300,15 +260,22 @@ void CServiceBase::KillService(std::wstring sName) {
 }
 void CServiceBase::StopServices()
 {
+	if (ExecOnSleep.length() > 0)
+	{
+		RunScheduledTask(ExecOnSleep);
+	}
 	CServiceHandle hServ = OpenService(hScm, L"AudioEndpointBuilder", SC_MANAGER_ALL_ACCESS);
-	DWORD BytesNeeded = 0;
-	DWORD Services = 0;
+	if (hServ.empty())
+		throw runtime_error("Unable to open main service");
+	
+	DWORD BytesNeeded = 0, Services = 0;
+
 	if (!EnumDependentServices(hServ, SERVICE_ACTIVE, NULL, 0, &BytesNeeded, &Services))
 		if (!BytesNeeded)
-			throw boost::log::runtime_error("Unable to enum services");
+			throw runtime_error("Unable to enum services");
 	LPENUM_SERVICE_STATUS DependedSvcs = (LPENUM_SERVICE_STATUS) new  byte[BytesNeeded];
 	if (!EnumDependentServices(hServ, SERVICE_ACTIVE, DependedSvcs, BytesNeeded, &BytesNeeded, &Services))
-		throw boost::log::runtime_error("Unable to enum services");
+		throw runtime_error("Unable to enum services");
 
 	//Send stop signals to services
 	vecServices.push_back(L"AudioEndpointBuilder");
@@ -357,38 +324,109 @@ void CServiceBase::StartServices() {
 	{
 		CServiceHandle hService = OpenService(hScm, sService.c_str(), SERVICE_ALL_ACCESS);
 		if (!StartService(hService, NULL, NULL))
-			if (GetLastError()!=ERROR_SERVICE_ALREADY_RUNNING)
-				WriteErrorLogEntry(str(wformat(L"Unable to start service %s ") % sService).c_str(),GetLastError());
+			if (GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
+				WriteErrorLogEntry(str(wformat(L"Unable to start service %s ") % sService).c_str(), GetLastError());
+	}
+	if (ExecOnWake.length() > 0)
+	{
+		RunScheduledTask(ExecOnWake);
 	}
 }
 
+bool CServiceBase::RunScheduledTask(std::wstring Taskname) {
+	try {
+		HRESULT hr = S_OK;
+		_COM_SMARTPTR_TYPEDEF(ITaskService, __uuidof(ITaskService));
+		_COM_SMARTPTR_TYPEDEF(ITaskFolder, __uuidof(ITaskFolder));
+		_COM_SMARTPTR_TYPEDEF(IRegisteredTask, __uuidof(IRegisteredTask));
+		_COM_SMARTPTR_TYPEDEF(IRunningTask, __uuidof(IRunningTask));
+		ITaskServicePtr pITS;
 
+		hr = CoInitialize(NULL);
+		if (FAILED(hr))
+		{
+			throw runtime_error("Unable to Initialize COM");
+		}
+		hr = CoCreateInstance(CLSID_TaskScheduler,
+			NULL,
+			CLSCTX_INPROC_SERVER,
+			IID_ITaskService,
+			(void**)& pITS);
+		if (FAILED(hr))
+		{
+			throw runtime_error("Unable to create  TaskScheduler object ");
+		}
+		hr = pITS->Connect(_variant_t(), _variant_t(),
+			_variant_t(), _variant_t());
+		if (FAILED(hr))
+		{
+			throw runtime_error(str(format("ITaskService::Connect failed: %x") % hr).c_str());
+			
+		}
+		ITaskFolderPtr pRootFolder = NULL;
+		hr = pITS->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+		if (FAILED(hr))
+		{
+			throw runtime_error(str(format("Cannot get Root Folder pointer: %x") % hr).c_str());
+		}
+		IRegisteredTaskPtr pITask;
+		hr = pRootFolder->GetTask(_bstr_t(Taskname.c_str()), &pITask);
+		if (FAILED(hr))
+		{
+			throw runtime_error(str(format("GetTask failed: %x") % hr).c_str());
+		}
+		IRunningTaskPtr pRunTask;
+		hr = pITask->Run(_variant_t(), &pRunTask);
+		if (FAILED(hr)) {
+			throw runtime_error(str(format("RunTask failed: %x") % hr).c_str());
+		}
+	}
+	catch (runtime_error e) {
+		WriteErrorLogEntry(e.what());
+		return false;
+	}
+	CoUninitialize();
+	return true;
+}
+bool CServiceBase::RegPowerNotification() {
+	m_hLidSwitchNotify = RegisterPowerSettingNotification(s_service->m_statusHandle, &GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_SERVICE_HANDLE);
+	if (NULL == m_hLidSwitchNotify)
+		return false;
+	m_hPowerSrcNotify = RegisterPowerSettingNotification(s_service->m_statusHandle, &GUID_ACDC_POWER_SOURCE, DEVICE_NOTIFY_SERVICE_HANDLE);
+	if (NULL == m_hPowerSrcNotify)
+	{
+		UnregPowerNotification();
+		return false;
+	}
+	return true;
+}
+void CServiceBase::UnregPowerNotification() {
+	if (NULL != m_hPowerSrcNotify) {
+		UnregisterPowerSettingNotification(m_hPowerSrcNotify);
+		m_hPowerSrcNotify = NULL;
+	}
+	if (NULL != m_hLidSwitchNotify) {
+		UnregisterPowerSettingNotification(m_hLidSwitchNotify);
+		m_hLidSwitchNotify = NULL;
+	}
+}
 void CServiceBase::Stop()
 {
     DWORD dwOriginalState = m_status.dwCurrentState;
     try
     {
-        // Tell SCM that the service is stopping.
         SetServiceStatus(SERVICE_STOP_PENDING);
-
-
-        // Tell SCM that the service is stopped.
+		UnregPowerNotification();
         SetServiceStatus(SERVICE_STOPPED);
     }
     catch (DWORD dwError)
     {
-        // Log the error.
         WriteErrorLogEntry(L"Service Stop", dwError);
-
-        // Set the orginal service status.
         SetServiceStatus(dwOriginalState);
     }
     catch (...)
     {
-        // Log the error.
         WriteEventLogEntry(L"Service failed to stop.", EVENTLOG_ERROR_TYPE);
-
-        // Set the orginal service status.
         SetServiceStatus(dwOriginalState);
     }
 }
@@ -398,26 +436,17 @@ void CServiceBase::Shutdown()
 {
     try
     {
-        // Perform service-specific shutdown operations.
-
-        // Tell SCM that the service is stopped.
         SetServiceStatus(SERVICE_STOPPED);
     }
     catch (DWORD dwError)
     {
-        // Log the error.
         WriteErrorLogEntry(L"Service Shutdown", dwError);
     }
     catch (...)
     {
-        // Log the error.
         WriteEventLogEntry(L"Service failed to shut down.", EVENTLOG_ERROR_TYPE);
     }
 }
-
-#pragma endregion
-
-
 
 void CServiceBase::SetServiceStatus(DWORD dwCurrentState, 
                                     DWORD dwWin32ExitCode, 
@@ -485,4 +514,3 @@ void CServiceBase::WriteErrorLogEntry(PCWSTR pszFunction, DWORD dwError)
     WriteEventLogEntry(szMessage, EVENTLOG_ERROR_TYPE);
 }
 
-#pragma endregion
